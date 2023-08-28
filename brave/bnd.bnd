@@ -1,0 +1,6 @@
+# We use otlp.reporter.internal.InternalReporter to reconfigure AsyncReporter
+Import-Package: \
+  !otlp.reporter.internal*,\
+  *
+Export-Package: \
+  otlp.reporter.brave

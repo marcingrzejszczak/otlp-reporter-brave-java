@@ -4,7 +4,7 @@
 [![Build Status](https://github.com/openzipkin/zipkin-reporter-java/workflows/test/badge.svg)](https://github.com/openzipkin/zipkin/actions?query=workflow%3Atest)
 [![Maven Central](https://img.shields.io/maven-central/v/io.zipkin.reporter2/zipkin-reporter.svg)](https://search.maven.org/search?q=g:io.zipkin.reporter2%20AND%20a:otlp-reporter)
 
-This project reuses concepts from [OpenTelemetry Java](https://github.com/open-telemetry/opentelemetry-java/) for Http span exporting and combines it with Brave's Handler and Reporter mechanisms. When a span is finished the `MutableSpan` from Brave is being converted to a OTLP format and sent over the wire (either using JDK 11 or OK HTTP).
+This project reuses concepts from [OpenTelemetry Java](https://github.com/open-telemetry/opentelemetry-java/) for span exporting and combines it with Brave's Handler and Reporter mechanisms. When a span is finished the `MutableSpan` from Brave is being converted to a OTLP format and sent over the wire.
 
 ## Artifacts
 All artifacts publish to the group ID "io.zipkin.zipkin.reporter2". We use a common
@@ -41,17 +41,44 @@ Ex. in your dependencies section, import the BOM like this:
 ```
 
 Now, you can leave off the version when choosing any supported
-instrumentation. Also any indirect use will have versions aligned:
+instrumentation. To start sending the spans you would need to use GRPC in the following way
+
 ```xml
 <dependency>
-  <groupId>io.zipkin.reporter2</groupId>
-  <artifactId>otlp-sender-okhttp3</artifactId>
+    <groupId>io.grpc</groupId>
+    <artifactId>grpc-protobuf</artifactId>
+    <version>${grpc.version}</version>
+    <scope>compile</scope>
+</dependency>
+<dependency>
+    <groupId>io.grpc</groupId>
+    <artifactId>grpc-stub</artifactId>
+    <version>${grpc.version}</version>
+    <scope>compile</scope>
+</dependency>
+<dependency>
+    <groupId>io.grpc</groupId>
+    <artifactId>grpc-netty-shaded</artifactId>
+    <version>${grpc.version}</version>
 </dependency>
 ```
 
-With this in place, you can use the property `zipkin-reporter.version` to override dependency
-versions coherently. This is most commonly to test a new feature or fix.
+and then set up the `Reporter` and `Handler` like this
 
-Note: If you override a version, always double check that your version
-is valid (equal to or later) than what you are updating. This will avoid
-class conflicts.
+```java
+
+    SpanHandler otlpSpanHandler = OtlpSpanHandler
+      .create(OtlpReporter.create(ManagedChannelBuilder.forAddress("localhost", 4317)
+      // For demo purposes
+      .usePlaintext()));
+
+    Tracing tracing = Tracing.newBuilder()
+      .currentTraceContext(braveCurrentTraceContext)
+      .supportsJoin(false)
+      .traceId128Bit(true)
+      .sampler(Sampler.ALWAYS_SAMPLE)
+      // Add the SpanHandler
+      .addSpanHandler(otlpSpanHandler)
+      .localServiceName("my-service")
+      .build();
+```

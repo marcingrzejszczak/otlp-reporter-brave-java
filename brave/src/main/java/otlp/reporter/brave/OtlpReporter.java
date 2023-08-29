@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 The OpenZipkin Authors
+ * Copyright 2016-2023 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -15,102 +15,82 @@ package otlp.reporter.brave;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import com.google.protobuf.util.JsonFormat;
-import com.jayway.jsonpath.Configuration;
-import com.jayway.jsonpath.DocumentContext;
-import com.jayway.jsonpath.JsonPath;
-import com.jayway.jsonpath.Option;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.stub.StreamObserver;
+import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
+import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest.Builder;
+import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse;
+import io.opentelemetry.proto.collector.trace.v1.TraceServiceGrpc;
+import io.opentelemetry.proto.collector.trace.v1.TraceServiceGrpc.TraceServiceStub;
 import io.opentelemetry.proto.trace.v1.ResourceSpans;
 import io.opentelemetry.proto.trace.v1.TracesData;
-import otlp.reporter.HttpExporter;
-import zipkin2.codec.Encoding;
-import zipkin2.reporter.AsyncReporter;
 import zipkin2.reporter.Reporter;
-import zipkin2.reporter.Sender;
 
 /**
- * Synchronous reporter of {@link ResourceSpans}. Uses a given {@link Sender}
- * to actually send the spans over the wire. Supports {@link Encoding#JSON}
- * and {@link Encoding#PROTO3} formats.
+ * Asynchronous reporter of {@link ResourceSpans}.
  *
- * // TODO: Think of an async version, currently {@link AsyncReporter} is unusable
- *
- * @since 2.16
+ * @since 1.0
  */
 public final class OtlpReporter implements Reporter<TracesData>, Closeable {
   static final Logger logger = Logger.getLogger(OtlpReporter.class.getName());
 
-  private final HttpExporter httpExporter;
+  private final ManagedChannel channel;
 
-  OtlpReporter(HttpExporter httpExporter) {
-    this.httpExporter = httpExporter;
+  private final TraceServiceStub asyncStub;
+
+  OtlpReporter(ManagedChannelBuilder<?> channelBuilder) {
+    this.channel = channelBuilder.build();
+    this.asyncStub = TraceServiceGrpc.newStub(this.channel);
   }
 
   /**
    * Creates a new instance of the {@link OtlpReporter}.
    *
-   * @param exporter sender to send spans
+   * @param channelBuilder
    * @return {@link Reporter}
-   * @since 2.16
+   * @since 1.0
    */
-  public static Reporter<TracesData> create(HttpExporter exporter) {
-    return new OtlpReporter(exporter);
+  public static Reporter<TracesData> create(ManagedChannelBuilder<?> channelBuilder) {
+    return new OtlpReporter(channelBuilder);
   }
 
   @Override
   public void report(TracesData tracesData) {
-    try {
-      byte[] bytes;
-      String asString = JsonFormat.printer()
-        .printingEnumsAsInts()
-        .print(tracesData);
-      // TODO: https://stackoverflow.com/questions/53080136/protobuf-jsonformater-printer-convert-long-to-string-in-json
-      // this is ridiculous...
-      asString = fixOTLPJsonNotBeingInAccordanceWithProtobufsJsonConvertingMechanisms(asString);
-      bytes = asString.getBytes(Charset.defaultCharset());
-      // TODO: Currently we have 1 span per ResourceSpans, we could batch them
-      httpExporter.export(bytes);
+    Builder builder = ExportTraceServiceRequest.newBuilder();
+    for (ResourceSpans spans : tracesData.getResourceSpansList()) {
+      builder.addResourceSpans(spans);
     }
-    catch (IOException e) {
-      logger.log(Level.WARNING, "Exception occurred while trying to send spans", e);
-      throw new RuntimeException(e);
-    }
-  }
+    this.asyncStub.export(builder.build(), new StreamObserver<>() {
+      @Override
+      public void onNext(ExportTraceServiceResponse exportTraceServiceResponse) {
+        logger.log(Level.FINE, "Sent out spans to OTLP endpoint");
+      }
 
-  private String fixOTLPJsonNotBeingInAccordanceWithProtobufsJsonConvertingMechanisms(String asString) {
-    // "startTimeUnixNano", "endTimeUnixNano", "timeUnixNano" are not numbers
-    DocumentContext documentContext = JsonPath.parse(asString, Configuration.builder().options(Option.SUPPRESS_EXCEPTIONS).build());
-    // Protobuf does that
-    documentContext.map("$.resourceSpans[*].scopeSpans[*].spans[*].startTimeUnixNano", OtlpReporter::convertToNumber);
-    documentContext.map("$.resourceSpans[*].scopeSpans[*].spans[*].endTimeUnixNano", OtlpReporter::convertToNumber);
-    documentContext.map("$.resourceSpans[*].scopeSpans[*].spans[*].events[*].timeUnixNano", OtlpReporter::convertToNumber);
-    // Ids must be converted back from base64 - https://github.com/open-telemetry/opentelemetry-proto/blob/main/docs/specification.md#json-protobuf-encoding
-    documentContext.map("$.resourceSpans[*].scopeSpans[*].spans[*].traceId", OtlpReporter::convertBackFromBase64);
-    documentContext.map("$.resourceSpans[*].scopeSpans[*].spans[*].spanId", OtlpReporter::convertBackFromBase64);
-    documentContext.map("$.resourceSpans[*].scopeSpans[*].spans[*].parentSpanId", OtlpReporter::convertBackFromBase64);
-    return documentContext.jsonString();
-  }
+      @Override
+      public void onError(Throwable throwable) {
+        logger.log(Level.WARNING, "Failed to send spans to OTLP endpoint", throwable);
+      }
 
-  private static Object convertToNumber(Object currentValue, Configuration configuration) {
-    if (currentValue instanceof String) {
-      return Long.valueOf((String) currentValue);
-    }
-    return currentValue;
-  }
-
-  private static Object convertBackFromBase64(Object currentValue, Configuration configuration) {
-    if (currentValue instanceof String) {
-      return new String(Base64.decode((String) currentValue));
-    }
-    return currentValue;
+      @Override
+      public void onCompleted() {
+        logger.log(Level.FINE, "Completed sending of spans");
+      }
+    });
   }
 
   @Override
-  public void close() {
-    this.httpExporter.shutdown();
+  public void close() throws IOException {
+    this.channel.shutdown();
+    try {
+      this.channel.awaitTermination(1, TimeUnit.SECONDS);
+    }
+    catch (InterruptedException e) {
+      logger.log(Level.WARNING, "Failed to close the OTLP channel", e);
+    }
   }
 }

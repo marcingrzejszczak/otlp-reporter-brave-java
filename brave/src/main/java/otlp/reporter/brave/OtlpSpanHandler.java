@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 The OpenZipkin Authors
+ * Copyright 2016-2023 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -14,32 +14,30 @@
 package otlp.reporter.brave;
 
 import java.io.Closeable;
+import java.io.IOException;
 
 import brave.Tag;
 import brave.Tags;
 import brave.handler.MutableSpan;
 import brave.handler.SpanHandler;
 import brave.propagation.TraceContext;
-import io.opentelemetry.proto.trace.v1.ResourceSpans;
 import io.opentelemetry.proto.trace.v1.TracesData;
-import zipkin2.codec.SpanBytesEncoder;
 import zipkin2.reporter.Reporter;
 
 /**
- * This allows you to send spans recorded by Brave to a pre-configured {@linkplain Reporter OTLP
- * reporter}.
+ * This allows you to send spans recorded by Brave to a pre-configured {@linkplain Reporter OTLP reporter}.
  *
  * @see brave.Tracing.Builder#addSpanHandler(SpanHandler)
- * @since 2.16
+ * @since 1.0
  */
 public class OtlpSpanHandler extends SpanHandler implements Closeable {
-  /** @since 2.16 */
+  /** @since 1.0 */
   // SpanHandler not OtlpSpanHandler as it can coerce to NOOP
   public static SpanHandler create(Reporter<TracesData> spanReporter) {
     return newBuilder(spanReporter).build();
   }
 
-  /** @since 2.16 */
+  /** @since 1.0 */
   public static Builder newBuilder(Reporter<TracesData> spanReporter) {
     if (spanReporter == null) throw new NullPointerException("spanReporter == null");
     return new ConvertingOtlpSpanHandler.Builder(spanReporter);
@@ -51,7 +49,7 @@ public class OtlpSpanHandler extends SpanHandler implements Closeable {
    * <p><em>Note:</em> Call {@link #close()} if you no longer need this instance, as otherwise it
    * can leak resources.
    *
-   * @since 2.16
+   * @since 1.0
    */
   public Builder toBuilder() {
     // For testing, this is easier than making the type abstract: It is package sealed anyway!
@@ -62,13 +60,23 @@ public class OtlpSpanHandler extends SpanHandler implements Closeable {
    * Implementations that throw exceptions on close have bugs. This may result in log warnings,
    * though.
    *
-   * @since 2.16
+   * @since 1.0
    */
-  @Override public void close() {
+  @Override
+  public void close() {
+    if (this.spanReporter instanceof Closeable) {
+      try {
+        ((Closeable) this.spanReporter).close();
+      }
+      catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    }
   }
 
   public static abstract class Builder {
     Tag<Throwable> errorTag = Tags.ERROR;
+
     boolean alwaysReportSpans;
 
     Builder(OtlpSpanHandler otlpSpanHandler) {
@@ -86,7 +94,7 @@ public class OtlpSpanHandler extends SpanHandler implements Closeable {
      * alternative formats may have a different tag name or a field entirely. Hence, we only create
      * the "error" tag here, and only if not previously set.
      *
-     * @since 2.16
+     * @since 1.0
      */
     public Builder errorTag(Tag<Throwable> errorTag) {
       if (errorTag == null) throw new NullPointerException("errorTag == null");
@@ -110,7 +118,7 @@ public class OtlpSpanHandler extends SpanHandler implements Closeable {
      * tree, the resulting data could appear broken.
      *
      * @see TraceContext#sampledLocal()
-     * @since 2.16
+     * @since 1.0
      */
     public Builder alwaysReportSpans(boolean alwaysReportSpans) {
       this.alwaysReportSpans = alwaysReportSpans;
@@ -121,30 +129,35 @@ public class OtlpSpanHandler extends SpanHandler implements Closeable {
   }
 
   final Reporter<MutableSpan> spanReporter;
+
   final Tag<Throwable> errorTag; // for toBuilder()
+
   final boolean alwaysReportSpans;
 
   OtlpSpanHandler(Reporter<MutableSpan> spanReporter, Tag<Throwable> errorTag,
-      boolean alwaysReportSpans) {
+    boolean alwaysReportSpans) {
     this.spanReporter = spanReporter;
     this.errorTag = errorTag;
     this.alwaysReportSpans = alwaysReportSpans;
   }
 
-  @Override public boolean end(TraceContext context, MutableSpan span, Cause cause) {
+  @Override
+  public boolean end(TraceContext context, MutableSpan span, Cause cause) {
     if (!alwaysReportSpans && !Boolean.TRUE.equals(context.sampled())) return true;
     spanReporter.report(span);
     return true;
   }
 
-  @Override public String toString() {
+  @Override
+  public String toString() {
     return spanReporter.toString();
   }
 
   /**
    * Overridden to avoid duplicates when added via {@link brave.Tracing.Builder#addSpanHandler(SpanHandler)}
    */
-  @Override public final boolean equals(Object o) {
+  @Override
+  public final boolean equals(Object o) {
     if (o == this) return true;
     if (!(o instanceof OtlpSpanHandler)) return false;
     return spanReporter.equals(((OtlpSpanHandler) o).spanReporter);
@@ -153,7 +166,8 @@ public class OtlpSpanHandler extends SpanHandler implements Closeable {
   /**
    * Overridden to avoid duplicates when added via {@link brave.Tracing.Builder#addSpanHandler(SpanHandler)}
    */
-  @Override public final int hashCode() {
+  @Override
+  public final int hashCode() {
     return spanReporter.hashCode();
   }
 }

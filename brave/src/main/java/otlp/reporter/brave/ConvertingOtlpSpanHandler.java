@@ -19,7 +19,7 @@ import zipkin2.reporter.Reporter;
 
 final class ConvertingOtlpSpanHandler extends OtlpSpanHandler {
 
-  public ConvertingOtlpSpanHandler.Builder toBuilder() {
+  public Builder toBuilder() {
     return new Builder(((OtlpConvertingSpanReporter) spanReporter).delegate);
   }
 

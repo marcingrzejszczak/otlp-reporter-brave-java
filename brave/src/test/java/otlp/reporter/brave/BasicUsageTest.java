@@ -13,16 +13,13 @@
  */
 package otlp.reporter.brave;
 
-import java.util.function.Supplier;
-
 import brave.Span;
 import brave.Span.Kind;
 import brave.Tracer;
 import brave.Tracing;
-import brave.handler.SpanHandler;
 import brave.propagation.ThreadLocalCurrentTraceContext;
 import brave.sampler.Sampler;
-import io.opentelemetry.proto.trace.v1.TracesData;
+import io.grpc.ManagedChannelBuilder;
 import okhttp3.OkHttpClient;
 import okhttp3.OkHttpClient.Builder;
 import okhttp3.Request;
@@ -30,16 +27,9 @@ import okhttp3.Response;
 import org.assertj.core.api.BDDAssertions;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.api.Test;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import otlp.reporter.HttpExporter;
-import otlp.reporter.HttpExporterBuilder;
-import otlp.reporter.HttpSenderProvider;
-import otlp.reporter.okhttp3.OkHttpHttpSenderProvider;
-import otlp.reporter.sender.JdkHttpSenderProvider;
-import zipkin2.reporter.Reporter;
 
 @Testcontainers
 class BasicUsageTest {
@@ -47,26 +37,23 @@ class BasicUsageTest {
   @Container
   static JaegerAllInOne jaegerAllInOne = new JaegerAllInOne();
 
-  HttpExporter httpExporter;
+  OtlpSpanHandler otlpSpanHandler;
 
   Tracing tracing;
 
-  @ParameterizedTest
-  @EnumSource(HttpProvider.class)
-  void shouldSendSpansToOtlpEndpoint(HttpProvider provider) throws InterruptedException {
+  @Test
+  void shouldSendSpansToOtlpEndpoint() throws InterruptedException {
     // Setup
-    httpExporter = new HttpExporterBuilder("http://localhost:" + jaegerAllInOne.getHttpOtlpPort() + "/v1/traces").build(provider.get());
-    Reporter<TracesData> otlpReporter = OtlpReporter.create(httpExporter);
-    SpanHandler spanHandler = OtlpSpanHandler
-      .create(otlpReporter);
     ThreadLocalCurrentTraceContext braveCurrentTraceContext = ThreadLocalCurrentTraceContext.newBuilder()
       .build();
+    otlpSpanHandler = (OtlpSpanHandler) OtlpSpanHandler.create(OtlpReporter.create(ManagedChannelBuilder.forAddress("localhost", jaegerAllInOne.getGrpcOtlpPort())
+      .usePlaintext()));
     tracing = Tracing.newBuilder()
       .currentTraceContext(braveCurrentTraceContext)
       .supportsJoin(false)
       .traceId128Bit(true)
       .sampler(Sampler.ALWAYS_SAMPLE)
-      .addSpanHandler(spanHandler)
+      .addSpanHandler(otlpSpanHandler)
       .localServiceName("my-service")
       .build();
     Tracer braveTracer = tracing.tracer();
@@ -88,6 +75,8 @@ class BasicUsageTest {
     // When
     started.finish();
 
+    Thread.sleep(1000);
+
     // Then
     Awaitility.await().untilAsserted(() -> {
       OkHttpClient client = new Builder()
@@ -99,30 +88,13 @@ class BasicUsageTest {
     });
   }
 
-  enum HttpProvider implements Supplier<HttpSenderProvider> {
-
-    JDK {
-      @Override
-      public HttpSenderProvider get() {
-        return new JdkHttpSenderProvider();
-      }
-    },
-
-    OK_HTTP {
-      @Override
-      public HttpSenderProvider get() {
-        return new OkHttpHttpSenderProvider();
-      }
-    }
-  }
-
   @AfterEach
   void shutdown() {
     if (tracing != null) {
       tracing.close();
     }
-    if (httpExporter != null) {
-      httpExporter.shutdown();
+    if (otlpSpanHandler != null) {
+      otlpSpanHandler.close();
     }
   }
 }
